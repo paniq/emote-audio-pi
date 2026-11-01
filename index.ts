@@ -6,9 +6,10 @@
  * trace. Tool results get a musical cue: rising notes when a call worked, falling
  * notes when it failed.
  *
- * config.json is the whole mapping: each entry names the folder under soundsDir
- * that holds its takes, and the words that fire it. The extension only ever plays
- * files - it never synthesizes anything.
+ * config.json chooses a soundpack, and every soundpack is a directory with its
+ * own config.json and its own audio files: one entry per category, naming the
+ * folder that holds its takes and the words that fire it. The extension only
+ * ever plays files - it never synthesizes anything.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -20,8 +21,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const STATUS_KEY = "emote-audio-pi";
 const AUDIO_EXT = [".wav", ".mp3", ".ogg", ".opus", ".flac", ".m4a"];
 const LOG_MAX = 40;
-const SUBCOMMANDS = ["on", "off", "mute", "dry", "stats", "legend", "log", "test", "set", "rescan"];
 const SET_KEYS = ["cooldown", "gap", "queue", "text", "nested"];
+const DEFAULT_PACK = "default";
+const PACKS_DIR = "packs";
+const SUBCOMMANDS = ["on", "off", "mute", "dry", "stats", "legend", "log", "test", "set", "rescan", "packs", "use"];
 const PLAYERS = [
   { bin: "paplay", args: (file: string) => [file] },
   { bin: "pw-play", args: (file: string) => [file] },
@@ -51,8 +54,19 @@ interface Settings {
   maxQueue: number;
 }
 
+const DEFAULT_SETTINGS: Settings = {
+  enabled: true,
+  muted: false,
+  dryRun: false,
+  matchText: false,
+  skipNestedTools: true,
+  cooldownMs: 2500,
+  minGapMs: 500,
+  maxQueue: 2,
+};
+
 interface Category {
-  name: string; // folder name under soundsDir
+  name: string; // folder inside the pack, one per category
   words: string[];
   trigger: string; // "word", "tool_success" or "tool_failure"
   priority: boolean;
@@ -82,18 +96,12 @@ interface QueueItem {
 const WORD_CHAR = /[\p{L}']/u;
 
 export default function (pi: ExtensionAPI) {
-  const cfg: Settings = {
-    enabled: true,
-    muted: false,
-    dryRun: false,
-    matchText: false,
-    skipNestedTools: true,
-    cooldownMs: 2500,
-    minGapMs: 500,
-    maxQueue: 2,
-  };
+  const cfg: Settings = { ...DEFAULT_SETTINGS };
 
-  let soundsDir = join(extDir(), "sounds");
+  let packsDir = join(extDir(), PACKS_DIR);
+  let packName = DEFAULT_PACK;
+  let soundsDir = join(packsDir, DEFAULT_PACK); // audio root of the active pack
+  let rootSettings: Record<string, unknown> = {};
   const categories = new Map<string, Category>();
   const wordMap = new Map<string, string>(); // word -> category name
 
@@ -125,39 +133,111 @@ export default function (pi: ExtensionAPI) {
   const clock = () => new Date().toISOString().slice(11, 19);
   const sorted = () => [...categories.values()].sort((a, b) => a.name.localeCompare(b.name));
   const totalTakes = () => [...categories.values()].reduce((n, c) => n + c.files.length, 0);
+  const plural = (n: number, word: string) => `${n} ${n === 1 ? word : word.replace(/y$/, "ies")}`;
 
   // ---------- config ----------
 
-  function loadConfig(): void {
-    categories.clear();
-    wordMap.clear();
-    configError = "";
+  function readJsonFile(file: string): any {
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    if (typeof data !== "object" || data === null) throw new Error("not an object");
+    return data;
+  }
+
+  // Pack settings win over the shared defaults in the top-level config.json.
+  function applySettings(overrides: any): void {
+    Object.assign(cfg, DEFAULT_SETTINGS, rootSettings, overrides || {});
+  }
+
+  // A pack is one directory under packsDir: its own config.json and its own
+  // folders of takes. Nothing changes until the pack is read cleanly, so a bad
+  // pack leaves the working one in place. Returns "" on success.
+  function loadPack(name: string): string {
+    const dir = join(packsDir, name);
+    if (!existsSync(dir)) return `pack ${name}: no directory under ${packsDir}`;
+
+    const file = join(dir, "config.json");
+    if (!existsSync(file)) return `pack ${name}: no config.json`;
 
     let data: any;
     try {
-      data = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
+      data = readJsonFile(file);
     } catch (error) {
-      configError = `config: ${error instanceof Error ? error.message : String(error)}`;
-      return;
+      return `pack ${name}: ${error instanceof Error ? error.message : String(error)}`;
     }
 
-    Object.assign(cfg, { ...(data.settings || {}) });
-    const dir = data.soundsDir || "sounds";
-    soundsDir = join(extDir(), dir);
-
-    for (const [name, raw] of Object.entries<any>(data.categories || {})) {
+    const parsed = new Map<string, Category>();
+    for (const [folder, raw] of Object.entries<any>(data.categories || {})) {
       const words = (raw.words || []).map((w: string) => String(w).toLowerCase());
-      const category: Category = {
-        name,
+      parsed.set(folder, {
+        name: folder,
         words,
         trigger: raw.trigger || "word",
         priority: raw.priority === true,
         files: [],
         bag: [],
         pos: 0,
-      };
-      categories.set(name, category);
-      for (const word of words) wordMap.set(word, name);
+      });
+    }
+
+    packName = name;
+    soundsDir = join(dir, data.soundsDir || "");
+    categories.clear();
+    wordMap.clear();
+    for (const [folder, category] of parsed) {
+      categories.set(folder, category);
+      for (const word of category.words) wordMap.set(word, folder);
+    }
+    applySettings(data.settings);
+    rescan();
+    return "";
+  }
+
+  function loadConfig(): void {
+    let rootError = "";
+    let packDefault = DEFAULT_PACK;
+    try {
+      const data = readJsonFile(CONFIG_FILE);
+      rootSettings = data.settings || {};
+      packsDir = join(extDir(), data.packsDir || PACKS_DIR);
+      packDefault = data.pack || DEFAULT_PACK;
+    } catch (error) {
+      rootSettings = {};
+      rootError = `config: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    configError = rootError || loadPack(process.env.EMOTE_PACK || packDefault);
+  }
+
+  // What a pack holds, read without touching the active one.
+  function describePack(name: string): { description: string; categories: number; takes: number; note: string } {
+    const dir = join(packsDir, name);
+    if (!existsSync(join(dir, "config.json"))) return { description: "", categories: 0, takes: 0, note: "no config.json" };
+    try {
+      const data = readJsonFile(join(dir, "config.json"));
+      const folders = Object.keys(data.categories || {});
+      const root = join(dir, data.soundsDir || "");
+      const takes = folders.reduce((n, folder) => n + countAudio(join(root, folder)), 0);
+      return { description: String(data.description || ""), categories: folders.length, takes, note: "" };
+    } catch (error) {
+      return { description: "", categories: 0, takes: 0, note: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  function countAudio(dir: string): number {
+    try {
+      return readdirSync(dir).filter((f) => AUDIO_EXT.includes(extname(f).toLowerCase())).length;
+    } catch {
+      return 0;
+    }
+  }
+
+  function packNames(): string[] {
+    try {
+      return readdirSync(packsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      return [];
     }
   }
 
@@ -349,14 +429,14 @@ export default function (pi: ExtensionAPI) {
     }
     const mode = cfg.muted ? "muted" : cfg.dryRun ? "dry" : "on";
     const last = log[0];
-    const text = `🎧 emote ${mode}${last ? ` · ${last.word} → ${last.category}` : ""}`;
+    const text = `🎧 emote ${mode} · ${packName}${last ? ` · ${last.word} → ${last.category}` : ""}`;
     if (text === lastStatus) return;
     lastStatus = text;
     ctx.ui.setStatus(STATUS_KEY, text);
   }
 
   pi.registerCommand("emote", {
-    description: "Emote audio: on | off | mute | dry | stats | legend | log | test <word or folder> | set <key> <value> | rescan",
+    description: "Emote audio: on | off | mute | dry | stats | legend | log | test <word or folder> | set <key> <value> | packs | use <pack> | rescan",
     getArgumentCompletions: (prefix: string) => {
       const [head, ...rest] = prefix.trim().split(/\s+/);
       const needle = rest[0] || "";
@@ -367,6 +447,10 @@ export default function (pi: ExtensionAPI) {
       if (head === "set") {
         const hits = SET_KEYS.filter((k) => k.startsWith(needle));
         return hits.length ? hits.map((k) => ({ value: `set ${k}`, label: k })) : null;
+      }
+      if (head === "use") {
+        const hits = packNames().filter((n) => n.startsWith(needle));
+        return hits.length ? hits.map((n) => ({ value: `use ${n}`, label: n })) : null;
       }
       const hits = SUBCOMMANDS.filter((s) => s.startsWith(head));
       return hits.length ? hits.map((v) => ({ value: v, label: v })) : null;
@@ -400,7 +484,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(
             [
               `Emote audio ${cfg.enabled ? (cfg.muted ? "muted" : cfg.dryRun ? "dry" : "on") : "off"} · player ${player?.bin ?? "none"}`,
-              `${totalTakes()} takes in ${categories.size} folders under ${soundsDir}`,
+              `pack ${packName} · ${plural(totalTakes(), "take")} in ${plural(categories.size, "category")} (${soundsDir})`,
               `cooldown ${cfg.cooldownMs}ms · min gap ${cfg.minGapMs}ms · queue ${cfg.maxQueue} · text ${cfg.matchText ? "on" : "off"} · nested ${cfg.skipNestedTools ? "skipped" : "counted"}`,
               `matched ${stats.matched} · played ${stats.played} · suppressed ${stats.suppressed} · throttled ${stats.throttled} · dropped ${stats.dropped} · missing ${stats.missing} · failed ${stats.failed}`,
               rows.length ? `\nBy category:\n${rows.join("\n")}` : "",
@@ -419,7 +503,7 @@ export default function (pi: ExtensionAPI) {
             const fires = category.words.length ? category.words.join(" ") : `on ${category.trigger}`;
             return `  ${category.name.padEnd(18)} ${takes}  ${fires}${category.priority ? " *" : ""}`;
           });
-          ctx.ui.notify(`${lines.join("\n")}\n(* keeps its slot in the queue)`, "info");
+          ctx.ui.notify(`pack ${packName}\n${lines.join("\n")}\n(* keeps its slot in the queue)`, "info");
           return;
         }
         case "log": {
@@ -432,7 +516,7 @@ export default function (pi: ExtensionAPI) {
           if (!arg) return ctx.ui.notify(`Usage: /emote test <folder or word>  (${sorted().map((c) => c.name).join(", ")})`, "info");
           const key = arg.toLowerCase();
           const category = categories.get(key) || (wordMap.get(key) ? categories.get(wordMap.get(key)!) : null);
-          if (!category) return ctx.ui.notify(`No folder '${key}' in config.json.`, "warning");
+          if (!category) return ctx.ui.notify(`No category '${key}' in pack ${packName}.`, "warning");
           trigger(category, `test:${key}`, true);
           showStatus(ctx);
           ctx.ui.notify(`${key} → ${log[0].outcome}`, "info");
@@ -463,9 +547,32 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(`emote ${key} = ${shown}`, "info");
           return;
         }
+        case "packs": {
+          const packs = packNames();
+          if (packs.length === 0) {
+            return ctx.ui.notify(`No soundpacks under ${packsDir}. Each one is a directory with its own config.json and one folder per category.`, "info");
+          }
+          const rows = packs.map((name) => {
+            const info = describePack(name);
+            const note = info.note ? ` (${info.note})` : info.description ? ` - ${info.description}` : "";
+            return `  ${name === packName ? "→" : "·"} ${name.padEnd(14)} ${plural(info.categories, "category").padStart(13)} ${plural(info.takes, "take").padStart(10)}${note}`;
+          });
+          ctx.ui.notify(`${rows.join("\n")}\n(→ is the pack in play)`, "info");
+          return;
+        }
+        case "use": {
+          if (!arg) return ctx.ui.notify(`Usage: /emote use <pack>  (${packNames().join(", ") || "none"})`, "info");
+          const error = loadPack(arg);
+          if (error) return ctx.ui.notify(`${error} - the pack in play is unchanged.`, "warning");
+          configError = "";
+          showStatus(ctx);
+          ctx.ui.notify(`Soundpack ${packName}: ${plural(categories.size, "category")}, ${plural(totalTakes(), "take")}.`, "info");
+          return;
+        }
         case "rescan": {
-          rescan();
-          ctx.ui.notify(`Rescanned ${soundsDir}: ${totalTakes()} takes in ${categories.size} folders.`, "info");
+          configError = loadPack(packName);
+          if (configError) return ctx.ui.notify(configError, "warning");
+          ctx.ui.notify(`Rescanned pack ${packName}: ${plural(categories.size, "category")}, ${plural(totalTakes(), "take")}.`, "info");
           return;
         }
         default: {
@@ -473,9 +580,9 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(
             [
               `Emote audio ${cfg.enabled ? (cfg.muted ? "muted" : cfg.dryRun ? "dry" : "on") : "off"} · player ${player?.bin ?? "none"}`,
-              `${totalTakes()} takes in ${categories.size} folders under ${soundsDir}${configError ? ` (${configError})` : ""}`,
+              `pack ${packName} · ${plural(totalTakes(), "take")} in ${plural(categories.size, "category")} (${soundsDir})${configError ? ` (${configError})` : ""}`,
               last ? `last heard: ${last.word} → ${last.category} (${last.outcome} ${last.at})` : "nothing heard yet",
-              "usage: /emote on|off|mute|dry|stats|legend|log|test <folder or word>|set <key> <value>|rescan",
+              "usage: /emote on|off|mute|dry|stats|legend|log|test <folder or word>|set <key> <value>|packs|use <pack>|rescan",
             ].join("\n"),
             "info",
           );
@@ -488,7 +595,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     loadConfig();
-    rescan();
     player = findPlayer();
     showStatus(ctx);
 
@@ -497,7 +603,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`Emote: no player found (tried ${PLAYERS.map((p) => p.bin).join(", ")}); matches will only be counted.`, "warning");
     }
     if (configError) ctx.ui.notify(`Emote: ${configError}`, "warning");
-    if (totalTakes() === 0) ctx.ui.notify(`Emote: no audio files under ${soundsDir}.`, "warning");
+    if (totalTakes() === 0) ctx.ui.notify(`Emote: pack ${packName} has no audio files under ${soundsDir}.`, "warning");
   });
 
   pi.on("message_start", (event) => {

@@ -1,0 +1,17 @@
+{
+  "description": "the original takes",
+  "categories": {
+    "confusion": { "words": ["hmm", "hmmh", "hmmm"] },
+    "mild_confusion": { "words": ["weird", "messy"] },
+    "hesitation": { "words": ["wait", "hey"] },
+    "acknowledgment": { "words": ["ah", "oh", "aha", "right", "alright", "okay"] },
+    "positive_assessment": { "words": ["good", "nice", "great", "perfect", "cute", "cool"] },
+    "acceptance": { "words": ["fine", "sure"] },
+    "frustration": { "words": ["ugh", "oops", "argh"] },
+    "surprise": { "words": ["wow", "whoa", "huh"] },
+    "dismissal": { "words": ["nah", "nope", "meh"] },
+    "amusement": { "words": ["fun", "ha"] },
+    "tool_success": { "trigger": "tool_success", "priority": true },
+    "tool_failure": { "trigger": "tool_failure", "priority": true }
+  }
+}
