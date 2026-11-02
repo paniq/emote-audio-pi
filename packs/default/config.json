@@ -12,6 +12,7 @@
     "dismissal": { "words": ["nah", "nope", "meh"] },
     "amusement": { "words": ["fun", "ha"] },
     "tool_success": { "trigger": "tool_success", "priority": true },
-    "tool_failure": { "trigger": "tool_failure", "priority": true }
+    "tool_failure": { "trigger": "tool_failure", "priority": true },
+    "handback": { "trigger": "handback", "priority": true }
   }
 }

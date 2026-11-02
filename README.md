@@ -3,7 +3,8 @@
 Plays a short sound when the reasoning stream shows an emotional expression, so
 you can tell what the model is doing from across the room without reading the
 trace. Tool results get a musical cue: rising notes when a call worked, falling
-notes when it failed.
+notes when it failed. A two-note chime marks the point where the run settles and
+the keyboard is the user's again.
 
 The extension only plays audio. `config.json` picks a soundpack, and a pack's own
 `config.json` decides which word fires which folder of takes.
@@ -24,7 +25,8 @@ sets the shared defaults, and each pack's `config.json` holds its own mapping.
 Each `categories` entry names one folder inside the pack: **the key is the folder
 name**, `words` are the words that fire it (whole words, matched
 case-insensitively in the reasoning stream), and `priority` entries keep their
-slot in the queue. Tool cues have no words; they name the outcome that fires them.
+slot in the queue. Event cues have no words; they name the outcome that fires
+them.
 
 ```json
 {
@@ -51,7 +53,8 @@ Each pack is a directory with its own `config.json`:
   "settings": { "cooldownMs": 1500 },
   "categories": {
     "confusion": { "words": ["hmm", "hmmh", "hmmm"] },
-    "tool_failure": { "trigger": "tool_failure", "priority": true }
+    "tool_failure": { "trigger": "tool_failure", "priority": true },
+    "handback": { "trigger": "handback", "priority": true }
   }
 }
 ```
@@ -60,6 +63,10 @@ Add a word to a list and that word fires that folder, so `positive_assessment`
 with `"words": ["good", "excellent"]` hears the same cue for both. A folder does
 not need to match a word list: any name works as long as the pack names it. Each
 list belongs to one pack, so two packs can send `good` to two different folders.
+
+A `trigger` says what fires a folder: `word` is the default, and the event cues
+are `tool_success`, `tool_failure` and `handback`, the last one sounding when the
+run settles and typing is free again.
 
 Settings:
 
@@ -118,6 +125,9 @@ A folder with two takes cycles two, a folder with one take repeats that one, and
 an empty folder logs `no takes`. Any format your player accepts works, and the
 extension plays whatever is there - it never synthesizes.
 
+The default pack's `handback` takes come from `synth/handback.py`, which writes
+the same ten files again on demand.
+
 Players are tried in order: `paplay`, `pw-play`, `aplay`, `ffplay`, `mpv`.
 
 ## Runtime Commands
@@ -158,7 +168,9 @@ Examples:
 4. One sound plays at a time on a single channel with a small queue; matches inside
    the cooldown are logged as `suppressed` rather than played
 5. `tool_result` → the category whose `trigger` is `tool_success` or `tool_failure`
-6. `session_shutdown` → kills the player process and clears the queue
+6. `agent_settled` → the `handback` category, once Pi has no automatic work left
+   and the user can type again
+7. `session_shutdown` → kills the player process and clears the queue
 
 Status line while running: `🎧 emote on · default · hmm → confusion`.
 
@@ -172,4 +184,5 @@ emote-audio-pi/
   packs/<pack>/           one directory per soundpack
     config.json           that pack's mapping and setting overrides
     <folder>/             the takes for one category
+  synth/handback.py       generates the default pack's handback takes
 ```

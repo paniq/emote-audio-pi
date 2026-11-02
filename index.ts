@@ -4,7 +4,8 @@
  * Plays a short sound when the reasoning stream shows an emotional expression, so
  * you can tell what the model is doing from across the room without reading the
  * trace. Tool results get a musical cue: rising notes when a call worked, falling
- * notes when it failed.
+ * notes when it failed. A two-note chime marks the point where the run settles
+ * and the keyboard is the user's again.
  *
  * config.json chooses a soundpack, and every soundpack is a directory with its
  * own config.json and its own audio files: one entry per category, naming the
@@ -68,7 +69,7 @@ const DEFAULT_SETTINGS: Settings = {
 interface Category {
   name: string; // folder inside the pack, one per category
   words: string[];
-  trigger: string; // "word", "tool_success" or "tool_failure"
+  trigger: string; // "word", or an event cue: tool_success, tool_failure, handback
   priority: boolean;
   files: string[];
   bag: string[];
@@ -413,8 +414,8 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function toolCategory(outcome: "tool_success" | "tool_failure"): Category | null {
-    for (const category of categories.values()) if (category.trigger === outcome) return category;
+  function triggerCategory(name: string): Category | null {
+    for (const category of categories.values()) if (category.trigger === name) return category;
     return null;
   }
 
@@ -624,9 +625,17 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", (event, ctx) => {
     if (!cfg.enabled) return;
     if (cfg.skipNestedTools && event.parentToolCallId) return;
-    const category = toolCategory(event.isError ? "tool_failure" : "tool_success");
+    const category = triggerCategory(event.isError ? "tool_failure" : "tool_success");
     if (!category) return;
     trigger(category, event.toolName);
+    showStatus(ctx);
+  });
+
+  pi.on("agent_settled", (event, ctx) => {
+    if (!cfg.enabled) return;
+    const category = triggerCategory("handback");
+    if (!category) return;
+    trigger(category, event.aborted ? "aborted" : "settled");
     showStatus(ctx);
   });
 
