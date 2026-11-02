@@ -1,0 +1,6 @@
+{
+  "description": "minimal version, handback only",
+  "categories": {
+    "handback": { "trigger": "handback", "priority": true }
+  }
+}
