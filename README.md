@@ -131,9 +131,6 @@ A folder with two takes cycles two, a folder with one take repeats that one, and
 an empty folder logs `no takes`. Any format your player accepts works, and the
 extension plays whatever is there - it never synthesizes.
 
-The default pack's `handback` takes come from `synth/handback.py`, which writes
-the same ten files again on demand.
-
 Players are tried in order: `paplay`, `pw-play`, `aplay`, `ffplay`, `mpv`.
 
 ## Runtime Commands
@@ -191,5 +188,4 @@ emote-audio-pi/
   packs/<pack>/           one directory per soundpack
     config.json           that pack's mapping and setting overrides
     <folder>/             the takes for one category
-  synth/handback.py       generates the default pack's handback takes
 ```
