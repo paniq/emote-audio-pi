@@ -69,6 +69,7 @@ const DEFAULT_SETTINGS: Settings = {
 interface Category {
   name: string; // folder inside the pack, one per category
   words: string[];
+  match: string; // "word" (whole word) or "substring" (anywhere in the stream)
   trigger: string; // "word", or an event cue: tool_success, tool_failure, handback
   priority: boolean;
   files: string[];
@@ -105,6 +106,9 @@ export default function (pi: ExtensionAPI) {
   let rootSettings: Record<string, unknown> = {};
   const categories = new Map<string, Category>();
   const wordMap = new Map<string, string>(); // word -> category name
+  const subMap = new Map<string, string>(); // substring -> category name
+  let longestSub = 0; // longest pattern, which keeps the tail small
+  let tail = ""; // the last few characters of the stream
 
   const lastHeard = new Map<string, number>();
   const stats = {
@@ -172,6 +176,7 @@ export default function (pi: ExtensionAPI) {
       parsed.set(folder, {
         name: folder,
         words,
+        match: raw.match === "substring" ? "substring" : "word",
         trigger: raw.trigger || "word",
         priority: raw.priority === true,
         files: [],
@@ -184,10 +189,18 @@ export default function (pi: ExtensionAPI) {
     soundsDir = join(dir, data.soundsDir || "");
     categories.clear();
     wordMap.clear();
+    subMap.clear();
     for (const [folder, category] of parsed) {
       categories.set(folder, category);
-      for (const word of category.words) wordMap.set(word, folder);
+      for (const word of category.words) {
+        if (!word) continue;
+        if (category.match === "substring") subMap.set(word, folder);
+        else wordMap.set(word, folder);
+      }
     }
+    longestSub = [...subMap.keys()].reduce((n, p) => Math.max(n, p.length), 0);
+    partialWord = "";
+    tail = "";
     applySettings(data.settings);
     rescan();
     return "";
@@ -403,8 +416,20 @@ export default function (pi: ExtensionAPI) {
 
   function scan(delta: string): void {
     for (const char of delta) {
-      if (WORD_CHAR.test(char)) {
-        partialWord += char.toLowerCase();
+      const lower = char.toLowerCase();
+      if (longestSub > 0) {
+        tail += lower;
+        if (tail.length > longestSub) tail = tail.slice(-longestSub);
+        for (const [pattern, folder] of subMap) {
+          if (tail.endsWith(pattern)) {
+            trigger(categories.get(folder)!, pattern);
+            tail = ""; // start the tail again, so one run of text cannot match twice
+            break;
+          }
+        }
+      }
+      if (WORD_CHAR.test(lower)) {
+        partialWord += lower;
         continue;
       }
       if (!partialWord) continue;
@@ -442,7 +467,7 @@ export default function (pi: ExtensionAPI) {
       const [head, ...rest] = prefix.trim().split(/\s+/);
       const needle = rest[0] || "";
       if (head === "test") {
-        const hits = sorted().map((c) => c.name).filter((n) => n.startsWith(needle));
+        const hits = [...sorted().map((c) => c.name), ...subMap.keys()].filter((n) => n.startsWith(needle));
         return hits.length ? hits.map((n) => ({ value: `test ${n}`, label: n })) : null;
       }
       if (head === "set") {
@@ -501,10 +526,12 @@ export default function (pi: ExtensionAPI) {
         case "legend": {
           const lines = sorted().map((category) => {
             const takes = String(category.files.length).padStart(2);
-            const fires = category.words.length ? category.words.join(" ") : `on ${category.trigger}`;
+            const fires = category.words.length
+              ? `${category.match === "substring" ? "sub " : ""}${category.words.join(" ")}`
+              : `on ${category.trigger}`;
             return `  ${category.name.padEnd(18)} ${takes}  ${fires}${category.priority ? " *" : ""}`;
           });
-          ctx.ui.notify(`pack ${packName}\n${lines.join("\n")}\n(* keeps its slot in the queue)`, "info");
+          ctx.ui.notify(`pack ${packName}\n${lines.join("\n")}\n(sub fires on substrings, * keeps its slot)`, "info");
           return;
         }
         case "log": {
@@ -516,7 +543,8 @@ export default function (pi: ExtensionAPI) {
         case "test": {
           if (!arg) return ctx.ui.notify(`Usage: /emote test <folder or word>  (${sorted().map((c) => c.name).join(", ")})`, "info");
           const key = arg.toLowerCase();
-          const category = categories.get(key) || (wordMap.get(key) ? categories.get(wordMap.get(key)!) : null);
+          const folder = wordMap.get(key) || subMap.get(key);
+          const category = categories.get(key) || (folder ? categories.get(folder) : null);
           if (!category) return ctx.ui.notify(`No category '${key}' in pack ${packName}.`, "warning");
           trigger(category, `test:${key}`, true);
           showStatus(ctx);
@@ -608,7 +636,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_start", (event) => {
-    if (event.message.role === "assistant") partialWord = "";
+    if (event.message.role === "assistant") partialWord = tail = "";
   });
 
   pi.on("message_update", (event, ctx) => {
@@ -654,6 +682,6 @@ export default function (pi: ExtensionAPI) {
       }
       active = null;
     }
-    partialWord = "";
+    partialWord = tail = "";
   });
 }

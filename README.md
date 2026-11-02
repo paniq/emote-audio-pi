@@ -23,10 +23,10 @@ directory itself as a package path.
 Configuration has two levels: the top-level `config.json` picks the soundpack and
 sets the shared defaults, and each pack's `config.json` holds its own mapping.
 Each `categories` entry names one folder inside the pack: **the key is the folder
-name**, `words` are the words that fire it (whole words, matched
-case-insensitively in the reasoning stream), and `priority` entries keep their
-slot in the queue. Event cues have no words; they name the outcome that fires
-them.
+name**, `words` are the text that fires it case-insensitively, `match` says how
+(`word` for whole words, `substring` for anywhere in the stream), and `priority`
+entries keep their slot in the queue. Event cues have no words; they name the
+outcome that fires them.
 
 ```json
 {
@@ -53,6 +53,7 @@ Each pack is a directory with its own `config.json`:
   "settings": { "cooldownMs": 1500 },
   "categories": {
     "confusion": { "words": ["hmm", "hmmh", "hmmm"] },
+    "question": { "words": ["?"], "match": "substring" },
     "tool_failure": { "trigger": "tool_failure", "priority": true },
     "handback": { "trigger": "handback", "priority": true }
   }
@@ -67,6 +68,11 @@ list belongs to one pack, so two packs can send `good` to two different folders.
 A `trigger` says what fires a folder: `word` is the default, and the event cues
 are `tool_success`, `tool_failure` and `handback`, the last one sounding when the
 run settles and typing is free again.
+
+`match` belongs to one entry, so a pack can hear `hmm` as a whole word and answer
+every `?` with a substring entry. Both paths read the same stream, so text that
+fits two entries fires both: `huh!` lands on a `huh` word entry and on a `huh!`
+substring entry, which is the reason for keeping them apart.
 
 Settings:
 
@@ -139,9 +145,9 @@ Players are tried in order: `paplay`, `pw-play`, `aplay`, `ffplay`, `mpv`.
 | `/emote mute` | Keep counting matches, play nothing |
 | `/emote dry` | Log what would play instead of playing it |
 | `/emote stats` | Counts per category, plus played/suppressed/dropped/failed |
-| `/emote legend` | Folder → words → take count |
+| `/emote legend` | Folder → how it fires → take count |
 | `/emote log` | Last 20 matches with the outcome of each |
-| `/emote test <folder or word>` | Play one take now, e.g. `/emote test ugh` |
+| `/emote test <folder, word or pattern>` | Play one take now, e.g. `/emote test ?` |
 | `/emote set <key> <value>` | cooldown \| gap \| queue \| text \| nested |
 | `/emote packs` | Every pack under `packsDir`, with categories, takes and description |
 | `/emote use <pack>` | Switch to a pack |
@@ -161,10 +167,11 @@ Examples:
 
 1. `session_start` → reads `config.json`, loads the pack it names, scans that
    pack's folders for takes, finds a player
-2. `message_update` → thinking deltas are scanned character by character, so a word
-   split across two deltas is still caught when it completes
-3. A completed word looks up its category, the cooldown is checked, and a take is
-   pulled from that category's round-robin bag
+2. `message_update` → thinking deltas are scanned character by character: a whole
+   word is caught when it completes even if it spans two deltas, and a substring
+   entry fires when its pattern lands at the end of the rolling tail
+3. A match looks up its category, the cooldown is checked, and a take is pulled
+   from that category's round-robin bag
 4. One sound plays at a time on a single channel with a small queue; matches inside
    the cooldown are logged as `suppressed` rather than played
 5. `tool_result` → the category whose `trigger` is `tool_success` or `tool_failure`
